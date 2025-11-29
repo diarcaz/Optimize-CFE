@@ -1,45 +1,25 @@
 <#
 .SYNOPSIS
-    Script de Optimización de Estaciones de Trabajo en el Área de Finanzas (CFE – Zona Carmen)
-    Proyecto: "Script de Optimización de Estaciones de Trabajo"
-    Alumno: Arturo Enrique Martínez Sena
-    
+    Optimize-CFE.ps1 - Script de Optimización para estaciones administrativas (CFE - Zona Carmen)
 .DESCRIPTION
-    Herramienta interna de mantenimiento preventivo para mejorar el rendimiento de las computadoras.
-    Realiza limpieza de archivos temporales, optimización de inicio, ajustes de energía y limpieza avanzada opcional.
-    Diseñado para ser seguro, no invasivo y 100% reversible.
-
+    Limpieza por antigüedad en lotes, limpieza avanzada opcional, manejo seguro de accesos de inicio,
+    intento de aplicar plan Alto Rendimiento, y registro detallado (UTF-8).
 .PARAMETER DryRun
-    Si se especifica, simula las acciones sin realizar cambios reales (Modo Seguro).
-    
+    Simulación (no hace cambios).
 .PARAMETER DaysToKeep
-    Días de antigüedad para conservar archivos temporales. Por defecto: 30.
-    
+    Días a conservar (por defecto 30).
 .PARAMETER BatchSize
-    Número de archivos a procesar por lote para evitar saturación. Por defecto: 1000.
-    
+    Archivos por lote (por defecto 1000).
 .PARAMETER DisableStartup
-    Opcional. Si se especifica, mueve los accesos directos de inicio a una carpeta de respaldo.
-    
+    Mueve accesos de inicio a subcarpeta Startup_Disabled.
 .PARAMETER DeepClean
-    Opcional. Realiza limpieza avanzada: Vacía Papelera de Reciclaje y Caché DNS.
-    
+    Limpieza avanzada: Papelera + DNS.
 .PARAMETER RemoveBloatware
-    Opcional. Elimina aplicaciones preinstaladas de consumo (Xbox, Solitaire, Zune, etc.).
-    
+    Intento de eliminación de apps de consumo (use con precaución).
 .PARAMETER LogPath
-    Ruta donde se guardarán los registros. Por defecto: C:\CFE_Logs.
-    
+    Carpeta para logs (por defecto C:\CFE_Logs).
 .PARAMETER ShowConsoleSummary
-    Muestra un resumen final en la consola.
-
-.EXAMPLE
-    .\Optimize-CFE.ps1 -DryRun -ShowConsoleSummary
-    Ejecuta en modo simulación y muestra resumen.
-
-.EXAMPLE
-    .\Optimize-CFE.ps1 -DeepClean -RemoveBloatware -LogPath "C:\Logs"
-    Ejecuta optimización completa incluyendo limpieza profunda y bloatware.
+    Muestra resumen en consola.
 #>
 
 [CmdletBinding()]
@@ -54,9 +34,8 @@ param(
     [Switch]$ShowConsoleSummary
 )
 
-# Configuración Global
-$ErrorActionPreference = "SilentlyContinue"
-$Script:LogFile = ""
+# --- Ajustes ---
+$ErrorActionPreference = "Continue"    # evitar ocultar errores globalmente
 $Script:Stats = @{
     FilesDetected     = 0
     FilesDeleted      = 0
@@ -68,318 +47,273 @@ $Script:Stats = @{
     BloatwareRemoved  = 0
 }
 
-# --- FUNCIONES ---
-
-function Write-Log {
-    param(
-        [string]$Message,
-        [string]$Type = "INFO"
-    )
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $LogLine = "[$Timestamp] [$Type] $Message"
-    
-    # Escribir a archivo (UTF-8)
-    if ($Script:LogFile) {
-        Add-Content -Path $Script:LogFile -Value $LogLine -Encoding UTF8
-    }
-    
-    # Mostrar en consola si es Verbose o Error
-    if ($Type -eq "ERROR") {
-        Write-Host $LogLine -ForegroundColor Red
-    }
-    elseif ($VerbosePreference -ne 'SilentlyContinue') {
-        Write-Host $LogLine -ForegroundColor Gray
-    }
-}
-
 function Get-FormattedSize {
     param([double]$Bytes)
-    if ($Bytes -gt 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
-    if ($Bytes -gt 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
-    if ($Bytes -gt 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
-    return "{0} Bytes" -f $Bytes
+    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+    return "{0} Bytes" -f [int]$Bytes
+}
+
+function Write-Log {
+    param([string]$Message, [string]$Type = "INFO")
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $Line = "[$Timestamp] [$Type] $Message"
+    if ($Script:LogFile) {
+        # Asegurar que el archivo exista
+        Add-Content -Path $Script:LogFile -Value $Line -Encoding UTF8
+    }
+    if ($Type -eq "ERROR") { Write-Host $Line -ForegroundColor Red }
+    elseif ($VerbosePreference -ne 'SilentlyContinue') { Write-Host $Line -ForegroundColor Gray }
+}
+
+function Ensure-Log {
+    param([string]$Folder)
+    if (-not (Test-Path $Folder)) {
+        try { New-Item -ItemType Directory -Path $Folder -Force | Out-Null } catch { throw "No se pudo crear carpeta de logs: $Folder" }
+    }
+    $fileName = "CFE_Optimize_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    $Script:LogFile = Join-Path $Folder $fileName
+    "" | Out-File -FilePath $Script:LogFile -Encoding UTF8
+    Write-Log "Log inicializado: $Script:LogFile"
 }
 
 function Invoke-Cleaning {
-    Write-Log "Iniciando limpieza de archivos temporales (Antigüedad > $DaysToKeep días)..."
-    
+    param([int]$Days, [int]$BatchSize)
+    Write-Log "Iniciando limpieza: archivos con antigüedad mayor a $Days días..."
     $Targets = @(
         $env:TEMP,
         "$env:LOCALAPPDATA\Temp",
         "C:\Windows\Temp"
     )
-    
-    $CutoffDate = (Get-Date).AddDays(-$DaysToKeep)
-    $BatchCounter = 0
-    
+    $Cutoff = (Get-Date).AddDays(-$Days)
+
     foreach ($Path in $Targets) {
-        if (-not (Test-Path $Path)) { continue }
-        
-        Write-Log "Analizando ruta: $Path"
-        
-        try {
-            $Files = Get-ChildItem -Path $Path -Recurse -File -Force -ErrorAction SilentlyContinue | 
-            Where-Object { $_.LastWriteTime -lt $CutoffDate }
-            
-            foreach ($File in $Files) {
-                $Script:Stats.FilesDetected++
-                $Size = $File.Length
-                
-                if ($DryRun) {
-                    Write-Log "[DRYRUN] Se eliminaría: $($File.FullName) ($(Get-FormattedSize $Size))"
-                }
-                else {
-                    try {
-                        Remove-Item -Path $File.FullName -Force -ErrorAction Stop
-                        $Script:Stats.FilesDeleted++
-                        $Script:Stats.SpaceFreedBytes += $Size
-                        Write-Log "Eliminado: $($File.FullName)"
-                    }
-                    catch {
-                        $Script:Stats.Errors++
-                        Write-Log "Error al eliminar $($File.FullName): $($_.Exception.Message)" "ERROR"
-                    }
-                }
-                
-                # Control de lotes
-                $BatchCounter++
-                if ($BatchCounter -ge $BatchSize) {
-                    Start-Sleep -Milliseconds 50 # Pausa para no saturar I/O
-                    $BatchCounter = 0
-                }
-            }
+        if (-not (Test-Path $Path)) {
+            Write-Log "Ruta no encontrada: $Path" "WARN"
+            continue
         }
-        catch {
-            Write-Log "Error accediendo a $($Path): $($_.Exception.Message)" "ERROR"
+        Write-Log "Escaneando: $Path"
+        try {
+            $files = @(Get-ChildItem -Path $Path -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $Cutoff })
+            $count = $files.Count
+            $sizeSum = ($files | Measure-Object -Property Length -Sum).Sum
+            if (-not $sizeSum) { $sizeSum = 0 }
+
+            Write-Log "Detectados $count archivos en $Path (aprox. $(Get-FormattedSize $sizeSum))"
+            $Script:Stats.FilesDetected += $count
+
+            if ($DryRun) {
+                Write-Log "[DRYRUN] Listado (primeros 100) de archivos que se eliminarían en $Path:"
+                $files | Select-Object FullName, LastWriteTime, @{Name='Size';Expression={Get-FormattedSize $_.Length}} | Select-Object -First 100 | ForEach-Object { Write-Log ("  " + $_.FullName) }
+                continue
+            }
+
+            if ($count -eq 0) { continue }
+
+            # Procesar por lotes
+            $i = 0
+            while ($i -lt $files.Count) {
+                $end = [Math]::Min($i + $BatchSize - 1, $files.Count - 1)
+                $batch = $files[$i..$end]
+                Write-Log "Procesando lote de $($batch.Count) archivos en $Path"
+                foreach ($f in $batch) {
+                    try {
+                        $size = $f.Length
+                        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop
+                        $Script:Stats.FilesDeleted++
+                        $Script:Stats.SpaceFreedBytes += $size
+                    } catch {
+                        $Script:Stats.Errors++
+                        Write-Log "Error eliminando $($f.FullName): $($_.Exception.Message)" "ERROR"
+                    }
+                }
+                Start-Sleep -Milliseconds 150
+                $i = $end + 1
+            }
+
+            # Intentar borrar carpetas vacías (seguro)
+            try {
+                $dirs = @(Get-ChildItem -Path $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue)
+                foreach ($d in $dirs) {
+                    try {
+                        if ((Get-ChildItem -Path $d.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+                            Remove-Item -LiteralPath $d.FullName -Force -Recurse -ErrorAction Stop
+                        }
+                    } catch { }
+                }
+            } catch {}
+        } catch {
+            $Script:Stats.Errors++
+            Write-Log "Error accediendo a $Path: $($_.Exception.Message)" "ERROR"
         }
     }
 }
 
 function Invoke-AdvancedCleaning {
     if (-not $DeepClean) { return }
-    Write-Log "Iniciando Limpieza Avanzada..."
-
-    # 1. Vaciar Papelera
-    if ($DryRun) {
-        Write-Log "[DRYRUN] Se vaciaría la Papelera de Reciclaje."
-    }
+    Write-Log "Limpieza avanzada iniciada..."
+    if ($DryRun) { Write-Log "[DRYRUN] Se vaciaría la Papelera de Reciclaje y se limpiaría DNS." }
     else {
         try {
             Clear-RecycleBin -Force -ErrorAction Stop
-            Write-Log "Papelera de Reciclaje vaciada."
+            Write-Log "Papelera vaciada."
+        } catch {
+            Write-Log "No se pudo vaciar papelera con Clear-RecycleBin, intentando fallback (puede requerir privilegios)." "WARN"
         }
-        catch {
-            Write-Log "Error al vaciar Papelera: $($_.Exception.Message)" "WARN"
-        }
-    }
-
-    # 2. Limpiar Caché DNS
-    if ($DryRun) {
-        Write-Log "[DRYRUN] Se limpiaría la caché DNS."
-    }
-    else {
         try {
             Clear-DnsClientCache -ErrorAction Stop
             Write-Log "Caché DNS limpiada."
-        }
-        catch {
-            Write-Log "Error al limpiar DNS: $($_.Exception.Message)" "WARN"
+        } catch {
+            # fallback
+            try { ipconfig /flushdns | Out-Null; Write-Log "Caché DNS limpiada con ipconfig /flushdns (fallback)." } catch { Write-Log "No se pudo limpiar caché DNS." "WARN" }
         }
     }
 }
 
 function Optimize-Services {
-    Write-Log "Verificando servicios para optimización..."
-    
-    # Lista de servicios a optimizar (Telemetría básica)
-    $Services = @("DiagTrack") 
-
-    foreach ($ServiceName in $Services) {
-        $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($Service -and $Service.Status -eq 'Running') {
-            if ($DryRun) {
-                Write-Log "[DRYRUN] Se detendría y deshabilitaría el servicio: $ServiceName"
-            }
-            else {
-                try {
-                    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-                    Set-Service -Name $ServiceName -StartupType Disabled -ErrorAction Stop
-                    $Script:Stats.ServicesOptimized++
-                    Write-Log "Servicio optimizado (Detenido/Deshabilitado): $ServiceName"
-                }
-                catch {
-                    Write-Log "Error al optimizar servicio $($ServiceName): $($_.Exception.Message)" "ERROR"
+    Write-Log "Chequeando servicios recomendados para optimizar..."
+    $services = @("DiagTrack")  # ejemplo seguro (telemetry)
+    foreach ($s in $services) {
+        try {
+            $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') {
+                if ($DryRun) { Write-Log "[DRYRUN] Se detendría y deshabilitaría servicio: $s" }
+                else {
+                    try {
+                        Stop-Service -Name $s -Force -ErrorAction Stop
+                        Set-Service -Name $s -StartupType Disabled -ErrorAction Stop
+                        $Script:Stats.ServicesOptimized++
+                        Write-Log "Servicio detenido y deshabilitado: $s"
+                    } catch { Write-Log "Error gestionando servicio $s: $($_.Exception.Message)" "WARN" }
                 }
             }
-        }
+        } catch { Write-Log "Error consultando servicio $s: $($_.Exception.Message)" "WARN" }
     }
 }
 
 function Remove-Bloatware {
     if (-not $RemoveBloatware) { return }
-    Write-Log "Analizando Bloatware (Apps de consumo)..."
-
-    # Lista segura de apps a eliminar
-    $BloatwareApps = @(
+    Write-Log "Iniciando intento de eliminación de bloatware (uso con precaución)."
+    $apps = @(
         "Microsoft.XboxApp",
-        "Microsoft.ZuneMusic",
-        "Microsoft.ZuneVideo",
-        "Microsoft.BingWeather",
         "Microsoft.MicrosoftSolitaireCollection",
-        "Microsoft.GetHelp",
         "Microsoft.Getstarted",
-        "Microsoft.Office.OneNote",
-        "Microsoft.People",
-        "Microsoft.SkypeApp",
-        "Microsoft.Wallet",
         "Microsoft.YourPhone"
     )
-
-    foreach ($App in $BloatwareApps) {
-        if ($DryRun) {
-            $Package = Get-AppxPackage -Name $App -ErrorAction SilentlyContinue
-            if ($Package) {
-                Write-Log "[DRYRUN] Se eliminaría la aplicación: $App"
-            }
-        }
-        else {
-            try {
-                $Package = Get-AppxPackage -Name $App -ErrorAction SilentlyContinue
-                if ($Package) {
-                    Get-AppxPackage -Name $App | Remove-AppxPackage -ErrorAction Stop
+    foreach ($a in $apps) {
+        try {
+            $pkg = Get-AppxPackage -Name $a -ErrorAction SilentlyContinue
+            if ($pkg) {
+                if ($DryRun) { Write-Log "[DRYRUN] Se eliminaría paquete: $a" }
+                else {
+                    Get-AppxPackage -Name $a | Remove-AppxPackage -ErrorAction Stop
                     $Script:Stats.BloatwareRemoved++
-                    Write-Log "Aplicación eliminada: $App"
+                    Write-Log "Paquete eliminado: $a"
                 }
             }
-            catch {
-                Write-Log "Error al eliminar app $($App): $($_.Exception.Message)" "WARN"
-            }
-        }
+        } catch { Write-Log "No se pudo eliminar paquete $a: $($_.Exception.Message)" "WARN" }
     }
 }
 
 function Optimize-Startup {
-    Write-Log "Analizando elementos de inicio..."
-    
+    Write-Log "Analizando carpetas de inicio..."
     $StartupPaths = @(
         "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup",
         "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"
     )
-    
-    foreach ($Path in $StartupPaths) {
-        if (Test-Path $Path) {
-            $Items = Get-ChildItem -Path $Path -Filter "*.lnk"
-            foreach ($Item in $Items) {
-                Write-Log "Detectado en inicio: $($Item.Name)"
-                
-                if ($DisableStartup) {
-                    $DisabledPath = Join-Path $Path "Startup_Disabled"
-                    if (-not (Test-Path $DisabledPath)) {
-                        New-Item -ItemType Directory -Path $DisabledPath -Force | Out-Null
-                    }
-                    
-                    if ($DryRun) {
-                        Write-Log "[DRYRUN] Se movería $($Item.Name) a $DisabledPath"
-                    }
-                    else {
-                        try {
-                            Move-Item -Path $Item.FullName -Destination $DisabledPath -Force -ErrorAction Stop
-                            $Script:Stats.StartupMoved++
-                            Write-Log "Movido $($Item.Name) a Startup_Disabled"
-                        }
-                        catch {
-                            $Script:Stats.Errors++
-                            Write-Log "Error al mover $($Item.Name): $($_.Exception.Message)" "ERROR"
+    foreach ($p in $StartupPaths) {
+        if (-not (Test-Path $p)) { continue }
+        try {
+            $items = @(Get-ChildItem -Path $p -Filter "*.lnk" -File -Force -ErrorAction SilentlyContinue)
+            if ($items.Count -gt 0) {
+                Write-Log "Encontrados $($items.Count) accesos en $p"
+                foreach ($it in $items) {
+                    Write-Log "Detectado: $($it.Name)"
+                    if ($DisableStartup) {
+                        $disabled = Join-Path $p "Startup_Disabled"
+                        if (-not (Test-Path $disabled)) { New-Item -Path $disabled -ItemType Directory -Force | Out-Null }
+                        if ($DryRun) { Write-Log "[DRYRUN] Se movería $($it.Name) a $disabled" }
+                        else {
+                            try {
+                                Move-Item -LiteralPath $it.FullName -Destination (Join-Path $disabled $it.Name) -Force -ErrorAction Stop
+                                $Script:Stats.StartupMoved++
+                            } catch { $Script:Stats.Errors++; Write-Log "Error moviendo $($it.Name): $($_.Exception.Message)" "ERROR" }
                         }
                     }
                 }
             }
-        }
+        } catch { Write-Log "Error en folder de inicio $p: $($_.Exception.Message)" "WARN" }
     }
 }
 
 function Set-HighPerformancePlan {
-    Write-Log "Verificando planes de energía..."
-    
-    if ($DryRun) {
-        Write-Log "[DRYRUN] Se intentaría aplicar el plan de Alto Rendimiento."
-        return
-    }
-    
+    Write-Log "Intentando aplicar plan de Alto Rendimiento..."
+    if ($DryRun) { Write-Log "[DRYRUN] No se aplicará plan de energía." ; return }
+
     try {
-        $Plans = powercfg /LIST
-        $HighPerf = $Plans | Select-String "Alto rendimiento|High performance"
-        
-        if ($HighPerf) {
-            # Extraer GUID (asumiendo formato estándar de powercfg)
-            if ($HighPerf -match 'GUID del plan de energía: ([a-f0-9\-]+)') {
-                $Guid = $Matches[1]
-                powercfg /SETACTIVE $Guid
-                $Script:Stats.PowerPlanChanged = $true
-                Write-Log "Plan de energía cambiado a Alto Rendimiento ($Guid)."
-            }
+        $out = (powercfg /LIST) 2>&1
+        # Buscar GUIDs con etiqueta High performance o Alto rendimiento
+        $matches = Select-String -InputObject $out -Pattern '([0-9A-Fa-f\-]{36}).*\((High performance|Alto rendimiento|Alto rendimiento \(Alto rendimiento\))\)' -AllMatches
+        if ($matches.Count -gt 0) {
+            $guid = ($matches.Matches | ForEach-Object { $_.Groups[1].Value })[0]
+            cmd /c "powercfg /SETACTIVE $guid" | Out-Null
+            $Script:Stats.PowerPlanChanged = $true
+            Write-Log "Plan de energía cambiado a Alto Rendimiento ($guid)."
+            return
         }
-        else {
-            Write-Log "Plan de Alto Rendimiento no encontrado. No se realizaron cambios." "WARN"
+
+        # Fallback: GUID conocido (High performance)
+        $fallback = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+        $rc = cmd /c "powercfg /SETACTIVE $fallback" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $Script:Stats.PowerPlanChanged = $true
+            Write-Log "Plan de energía cambiado (fallback) a GUID $fallback."
+        } else {
+            Write-Log "No se pudo aplicar plan de Alto Rendimiento (intente manualmente)." "WARN"
         }
-    }
-    catch {
-        Write-Log "Error al gestionar energía: $($_.Exception.Message)" "ERROR"
+    } catch {
+        Write-Log "Error aplicando plan de energía: $($_.Exception.Message)" "ERROR"
     }
 }
 
-# --- BLOQUE PRINCIPAL ---
-
+# --- EJECUCIÓN PRINCIPAL ---
 try {
-    # 1. Inicialización
-    if (-not (Test-Path $LogPath)) {
-        New-Item -ItemType Directory -Path $LogPath -Force | Out-Null
-    }
-    $LogFileName = "CFE_Optimize_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-    $Script:LogFile = Join-Path $LogPath $LogFileName
-    
-    Write-Log "=== INICIO DEL SCRIPT DE OPTIMIZACIÓN CFE (MEJORADO) ==="
-    Write-Log "Usuario: $env:USERNAME"
-    Write-Log "Modo DryRun: $DryRun"
-    Write-Log "Opciones: DeepClean=$DeepClean, RemoveBloatware=$RemoveBloatware, DisableStartup=$DisableStartup"
-    
-    # 2. Verificación de Permisos
-    $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $IsAdmin) {
-        Write-Log "ADVERTENCIA: El script no se está ejecutando como Administrador. Muchas optimizaciones fallarán." "WARN"
-    }
+    Ensure-Log -Folder $LogPath
 
-    # 3. Ejecución de Tareas
-    Invoke-Cleaning
+    Write-Log "Inicio del script - Usuario: $env:USERNAME - DryRun: $DryRun"
+
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) { Write-Log "Advertencia: no ejecutado como Administrador. Algunas acciones pueden fallar." "WARN" }
+
+    Invoke-Cleaning -Days $DaysToKeep -BatchSize $BatchSize
     Invoke-AdvancedCleaning
     Optimize-Services
     Remove-Bloatware
     Optimize-Startup
     Set-HighPerformancePlan
 
-    # 4. Resumen Final
-    Write-Log "=== FIN DEL PROCESO ==="
-    Write-Log "Archivos Detectados: $($Script:Stats.FilesDetected)"
-    Write-Log "Archivos Eliminados: $($Script:Stats.FilesDeleted)"
-    Write-Log "Espacio Liberado: $(Get-FormattedSize $Script:Stats.SpaceFreedBytes)"
-    Write-Log "Servicios Optimizados: $($Script:Stats.ServicesOptimized)"
-    Write-Log "Bloatware Eliminado: $($Script:Stats.BloatwareRemoved)"
-    Write-Log "Errores: $($Script:Stats.Errors)"
-    
+    # Resumen
+    Write-Log "=== RESUMEN ==="
+    Write-Log "Archivos detectados: $($Script:Stats.FilesDetected)"
+    Write-Log "Archivos eliminados: $($Script:Stats.FilesDeleted)"
+    Write-Log "Espacio liberado: $(Get-FormattedSize $Script:Stats.SpaceFreedBytes)"
+    Write-Log "Servicios optimizados: $($Script:Stats.ServicesOptimized)"
+    Write-Log "Bloatware eliminado: $($Script:Stats.BloatwareRemoved)"
+    Write-Log "Accesos movidos: $($Script:Stats.StartupMoved)"
+    Write-Log "Errores registrados: $($Script:Stats.Errors)"
+
     if ($ShowConsoleSummary) {
-        Write-Host "`n=== RESUMEN DE OPTIMIZACIÓN ===" -ForegroundColor Cyan
-        if ($DryRun) { $ModeStr = 'SIMULACIÓN' } else { $ModeStr = 'EJECUCIÓN' }
-        Write-Host "Modo: $ModeStr" -ForegroundColor Yellow
-        Write-Host "Archivos Eliminados: $($Script:Stats.FilesDeleted)"
-        Write-Host "Espacio Liberado: $(Get-FormattedSize $Script:Stats.SpaceFreedBytes)"
-        Write-Host "Servicios Optimizados: $($Script:Stats.ServicesOptimized)"
-        Write-Host "Bloatware Eliminado: $($Script:Stats.BloatwareRemoved)"
-        Write-Host "Errores: $($Script:Stats.Errors)"
+        Write-Host "`n=== RESUMEN ===" -ForegroundColor Cyan
+        Write-Host "Modo: $([bool]$DryRun ? 'SIMULACIÓN' : 'EJECUCIÓN')" -ForegroundColor Yellow
+        Write-Host "Archivos eliminados: $($Script:Stats.FilesDeleted)"
+        Write-Host "Espacio liberado: $(Get-FormattedSize $Script:Stats.SpaceFreedBytes)"
+        Write-Host "Accesos movidos: $($Script:Stats.StartupMoved)"
         Write-Host "Log guardado en: $Script:LogFile"
         Write-Host "==============================`n"
     }
 
-}
-catch {
-    Write-Error "Error crítico en el script: $($_.Exception.Message)"
+} catch {
+    Write-Log "Error crítico en script: $($_.Exception.Message)" "ERROR"
+    Write-Error "Error crítico: $($_.Exception.Message)"
 }
