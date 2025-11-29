@@ -368,7 +368,8 @@ try {
     
     if ($ShowConsoleSummary) {
         Write-Host "`n=== RESUMEN DE OPTIMIZACIÓN ===" -ForegroundColor Cyan
-        Write-Host "Modo: $(if($DryRun){'SIMULACIÓN'}else{'EJECUCIÓN'})" -ForegroundColor Yellow
+        $ModeStr = if ($DryRun) { 'SIMULACIÓN' }else { 'EJECUCIÓN' }
+        Write-Host "Modo: $ModeStr" -ForegroundColor Yellow
         Write-Host "Archivos Eliminados: $($Script:Stats.FilesDeleted)"
         Write-Host "Espacio Liberado: $(Get-FormattedSize $Script:Stats.SpaceFreedBytes)"
         Write-Host "Servicios Optimizados: $($Script:Stats.ServicesOptimized)"
