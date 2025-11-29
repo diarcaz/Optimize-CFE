@@ -1,0 +1,3 @@
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+
+Unblock-File -Path .\Optimize-CFE.ps1
